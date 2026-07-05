@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# Environments
+.env
+.venv
+venv/
+
+# Data (raw/qa corpora tracked separately — see note below)
+# Uncomment if corpus files get large and should live in Drive/GCS instead of git:
+# data/raw/*
+# data/qa/*
+# !data/raw/.gitkeep
+# !data/qa/.gitkeep
+
+# Model artifacts
+*.ckpt
+*.pt
+*.bin
+checkpoints/
+
+# Tokenizer binaries (keep configs, ignore trained binaries if large)
+tokenizer/*.model
+
+# OS/editor
+.DS_Store
+.vscode/
+
+# Colab
+.colab/
