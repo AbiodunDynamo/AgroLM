@@ -64,16 +64,28 @@ TOPIC_KEYWORDS = {
     "climate_adaptation": ["climate change", "climate adaptation", "resilience", "climate-smart"],
 }
 
-# Title/abstract exclusion list -- aimed at molecular/genomic methodology,
-# not breeding outcomes ("drought-tolerant maize variety released") which
-# should stay.
+# Title/abstract exclusion list.
+# Category 1: molecular/genomic research methodology -- not breeding outcomes
+# ("drought-tolerant maize variety released") which should stay.
+# Category 2: CGIAR institutional/administrative documents -- funding
+# proposals, program evaluations, strategy docs. These rank highly on bare
+# crop queries against CGSpace since CGIAR is the org running it, but they
+# are not advisory content and tend to be very long, skewing corpus token
+# counts without adding real diversity. Checked on title alone since these
+# titles are unambiguous.
 EXCLUSION_KEYWORDS = [
+    # genomic/molecular methodology
     "genome", "genomic", "sequencing", "qtl", "marker-assisted",
     "transcriptome", "proteomics", "phylogenetic", "allele",
     "genotyping", "molecular marker", "snp",
+    # institutional/administrative
+    "research program", "full proposal", "evaluation of", "call for proposals",
+    "strategic plan", "annual report", "project proposal", "concept note",
+    "terms of reference", "workshop report", "meeting report",
 ]
 
 MAX_NEW_DOCS_PER_RUN = 100
+MAX_DOCS_PER_CROP_PER_RUN = -(-MAX_NEW_DOCS_PER_RUN // len(CROPS))  # ceil division, e.g. 20 for 5 crops
 PAGE_SIZE = 20  # DSpace discover/search default-friendly page size
 REQUEST_DELAY_SECONDS = 1.5  # politeness / rate limiting between requests
 REQUEST_TIMEOUT = 30
@@ -289,17 +301,25 @@ def harvest(source):
     seen_uuids = load_seen_uuids()
 
     new_docs_saved = 0
-    crops_remaining = list(CROPS)
+    per_crop_saved = {crop: 0 for crop in CROPS}
+    # Queue-based round robin: a crop is re-appended to the back of the queue
+    # after each page as long as it isn't exhausted and hasn't hit its
+    # per-run cap yet. This guarantees every crop gets touched each run
+    # instead of one crop draining the entire MAX_NEW_DOCS_PER_RUN budget.
+    crops_queue = list(CROPS)
 
-    print(f"[{source}] starting run. Already seen {len(seen_uuids)} docs across all sources.")
+    print(f"[{source}] starting run. Already seen {len(seen_uuids)} docs across all sources. "
+          f"Per-crop cap this run: {MAX_DOCS_PER_CROP_PER_RUN}")
 
-    while crops_remaining and new_docs_saved < MAX_NEW_DOCS_PER_RUN:
-        crop = crops_remaining[0]
+    while crops_queue and new_docs_saved < MAX_NEW_DOCS_PER_RUN:
+        crop = crops_queue.pop(0)
         qstate = get_query_state(state, source, crop)
 
         if qstate["exhausted"]:
-            crops_remaining.pop(0)
-            continue
+            continue  # permanently done for this crop/source, don't re-queue
+
+        if per_crop_saved[crop] >= MAX_DOCS_PER_CROP_PER_RUN:
+            continue  # hit this run's cap for this crop, don't re-queue this run
 
         page = qstate["offset"] // PAGE_SIZE
         print(f"[{source}:{crop}] fetching page {page} (offset {qstate['offset']})")
@@ -307,18 +327,18 @@ def harvest(source):
         try:
             items, has_more = search_items(base_url, crop, page, PAGE_SIZE)
         except requests.HTTPError as e:
-            print(f"[{source}:{crop}] HTTP error: {e}. Marking exhausted for this run, will retry next run.")
-            crops_remaining.pop(0)
+            print(f"[{source}:{crop}] HTTP error: {e}. Skipping for this run, will retry next run.")
             continue
 
         if not items:
             qstate["exhausted"] = True
             save_state(state)
-            crops_remaining.pop(0)
             continue
 
         for item in items:
             if new_docs_saved >= MAX_NEW_DOCS_PER_RUN:
+                break
+            if per_crop_saved[crop] >= MAX_DOCS_PER_CROP_PER_RUN:
                 break
 
             meta = extract_metadata_fields(item)
@@ -395,16 +415,23 @@ def harvest(source):
 
             seen_uuids.add(uuid)
             new_docs_saved += 1
-            print(f"[{source}:{crop}] saved {uuid} ({word_count} words)")
+            per_crop_saved[crop] += 1
+            print(f"[{source}:{crop}] saved {uuid} ({word_count} words) "
+                  f"[{per_crop_saved[crop]}/{MAX_DOCS_PER_CROP_PER_RUN} this crop, "
+                  f"{new_docs_saved}/{MAX_NEW_DOCS_PER_RUN} this run]")
 
         qstate["offset"] += PAGE_SIZE
         if not has_more:
             qstate["exhausted"] = True
         save_state(state)
 
+        if not qstate["exhausted"] and per_crop_saved[crop] < MAX_DOCS_PER_CROP_PER_RUN:
+            crops_queue.append(crop)  # still has room and more pages -- rotate back for another turn
+
     print(f"[{source}] run complete. {new_docs_saved} new docs saved this run.")
-    if not crops_remaining:
-        print(f"[{source}] all crop queries exhausted.")
+    print(f"[{source}] per-crop breakdown: {per_crop_saved}")
+    if not crops_queue:
+        print(f"[{source}] all crop queries exhausted or capped for this run.")
 
 
 def main():
